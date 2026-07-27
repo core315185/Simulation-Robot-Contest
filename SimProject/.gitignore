@@ -1,0 +1,48 @@
+# =============================
+# Unity 生成物
+# =============================
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
+[Mm]emoryCaptures/
+
+# Visual Studio / VS Code 生成物
+.vs/
+.vscode/
+*.csproj
+*.unityproj
+*.sln
+*.suo
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+
+# OS生成ファイル
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+
+# Unityが自動生成するメタキャッシュ系
+sysinfo.txt
+*.apk
+*.aab
+*.unitypackage
+*.app
+
+# クラッシュレポート
+crashlytics-build.properties
+
+# 提出物の動画・大容量ログはリポジトリに含めない（別途Formsで提出）
+*.mp4
+Assets/../SimulationLogs/
