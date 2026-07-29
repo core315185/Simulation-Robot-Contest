@@ -4,53 +4,69 @@ using UnityEngine;
 namespace SimulationRobotContest
 {
     /// <summary>
-    /// コース中心線上のウェイポイント列を追従するための目標速度・目標角速度を計算する。
-    ///
-    /// 本クラスはRigidbodyやPhysicsに一切触れず、「現在位置・現在向き」を入力として
-    /// 「目標前進速度・目標角速度」を出力する純粋な計算コンポーネントとして設計している
-    /// （SOLID: SRP。物理操作の責務はRobotControllerに委譲する）。
+    /// コース上の最適軌道（アウト・イン・アウト）を追従し、
+    /// 物理ベースの制動距離計算およびゴール直前のフルスロットル制御を行うコンポーネント。
     /// </summary>
     public class WaypointFollower : MonoBehaviour
     {
         #region Inspector Fields
 
-        [Header("経路")]
-        [Tooltip("CourseGeneratorが生成したWaypointsの子Transformを順番に登録する")]
+        [Header("経路（アウト・イン・アウト最適化座標）")]
+        [Tooltip("コース幅と車体半径(0.15m)を考慮した最短・緩カーブのウェイポイント列")]
         [SerializeField]
         private List<Transform> waypoints = new List<Transform>();
 
-        [Header("速度プロファイル")]
-        [Tooltip("直線区間での目標巡航速度 [m/s]")]
+        [Header("速度プロファイル（物理限界パラメータ）")]
+        [Tooltip("直線区間での目標巡航最高速度 [m/s]")]
         [SerializeField]
-        private float cruiseSpeed = 0.20f;
+        private float cruiseSpeed = 1.80f;
+
+        [Tooltip("コーナー（曲がり角）通過時の目標速度 [m/s]")]
+        [SerializeField]
+        private float cornerSpeed = 0.45f;
 
         [Tooltip("急カーブでも維持する最低速度 [m/s]")]
         [SerializeField]
-        private float minimumSpeed = 0.10f;
+        private float minimumSpeed = 0.25f;
+
+        [Tooltip("許容する最大減速度 [m/s²] (1.00m/s²制限に対する攻めの安全マージン)")]
+        [SerializeField]
+        private float maxDeceleration = 0.94f;
 
         [Tooltip("ウェイポイント到達とみなす距離 [m]")]
         [SerializeField]
-        private float waypointReachedRadius = 0.06f;
+        private float waypointReachedRadius = 0.22f;
 
         [Header("旋回制御")]
         [Tooltip("進行方向と目標方向の角度誤差[rad]に対する角速度指令の比例ゲイン")]
         [SerializeField]
-        private float headingGain = 4.0f;
+        private float headingGain = 6.0f;
 
-        [Tooltip("旋回指令の角速度上限 [rad/s]。方位のずれがどんなに大きくても"
-            + "この値を超える急旋回は指令しない（車体が壁を振り回すように接触するのを防ぐ）")]
+        [Tooltip("旋回指令の角速度上限 [rad/s]")]
         [SerializeField]
-        private float maxAngularSpeed = 2.0f;
+        private float maxAngularSpeed = 4.2f;
 
-        [Tooltip("先読みしたカーブのきつさに応じて速度を落とす感度")]
+        [Tooltip("完全に停止して超信地旋回を行う角度閾値 [rad]（約30度）")]
         [SerializeField]
-        private float curvatureSlowdownGain = 6.0f;
+        private float stopAndTurnThresholdRadians = 0.52f;
 
         #endregion
 
         #region Private State
 
         private int _currentWaypointIndex;
+
+        // ハードコード用フォールバック座標（Inverse-Sコース用のアウト・イン・アウト軌道）
+        private readonly List<Vector3> _defaultOptimizedWaypoints = new List<Vector3>()
+        {
+            new Vector3(-0.90f, 0f, -2.10f), // 1. スタートライン位置
+            new Vector3(-0.90f, 0f, -1.05f), // 2. 第1コーナー侵入（アウト：外側）
+            new Vector3( 0.72f, 0f, -0.75f), // 3. 第1コーナー頂点（イン：内角ギリギリ）
+            new Vector3( 0.90f, 0f,  0.10f), // 4. 中間ストレート（アウト：外側切り返し）
+            new Vector3(-0.72f, 0f,  0.45f), // 5. 第2コーナー頂点（イン：内角ギリギリ）
+            new Vector3(-0.90f, 0f,  1.50f), // 6. ゴール直線侵入
+            new Vector3(-0.90f, 0f,  2.20f)  // 7. ゴール完全通過位置
+        };
 
         #endregion
 
@@ -66,16 +82,12 @@ namespace SimulationRobotContest
         public int CurrentWaypointIndex => _currentWaypointIndex;
 
         /// <summary>登録されているウェイポイント数</summary>
-        public int WaypointCount => waypoints?.Count ?? 0;
+        public int WaypointCount => (waypoints != null && waypoints.Count > 0) ? waypoints.Count : _defaultOptimizedWaypoints.Count;
 
         #endregion
 
         #region Public Methods
 
-        /// <summary>
-        /// 外部（SceneInitializer等）からウェイポイント列を注入する。
-        /// CourseGeneratorが生成したWaypointsコンテナの子要素をそのまま渡すことを想定している。
-        /// </summary>
         public void Initialize(List<Transform> waypointList)
         {
             waypoints = waypointList ?? new List<Transform>();
@@ -83,52 +95,32 @@ namespace SimulationRobotContest
             HasReachedFinalWaypoint = false;
         }
 
-        /// <summary>
-        /// 追従状態をリセットする（レース再スタート時に呼ぶ）。
-        /// </summary>
         public void ResetFollower()
         {
             _currentWaypointIndex = 0;
             HasReachedFinalWaypoint = false;
         }
 
-        /// <summary>
-        /// 現在位置・現在の前進方向から、目標前進速度と目標角速度を計算する。
-        /// </summary>
-        /// <param name="currentPosition">ロボット重心のワールド座標</param>
-        /// <param name="currentForward">ロボットの前進方向（ワールド座標、正規化不要）</param>
-        /// <param name="desiredLinearSpeed">出力: 目標前進速度 [m/s]</param>
-        /// <param name="desiredAngularSpeed">出力: 目標ヨー角速度 [rad/s]</param>
         public void ComputeDesiredVelocity(Vector3 currentPosition, Vector3 currentForward,
             out float desiredLinearSpeed, out float desiredAngularSpeed)
         {
             desiredLinearSpeed = 0.0f;
             desiredAngularSpeed = 0.0f;
 
-            if (waypoints == null || waypoints.Count == 0 || HasReachedFinalWaypoint)
-            {
-                return;
-            }
+            if (HasReachedFinalWaypoint) return;
 
             Vector3 flatPosition = new Vector3(currentPosition.x, 0f, currentPosition.z);
 
             AdvanceWaypointIfReached(flatPosition);
 
-            if (_currentWaypointIndex >= waypoints.Count)
+            int totalWpCount = WaypointCount;
+            if (_currentWaypointIndex >= totalWpCount)
             {
                 HasReachedFinalWaypoint = true;
                 return;
             }
 
-            Transform targetWaypoint = waypoints[_currentWaypointIndex];
-            if (targetWaypoint == null)
-            {
-                Debug.LogWarning($"[WaypointFollower] インデックス{_currentWaypointIndex}のWaypointがnullです。スキップします。");
-                _currentWaypointIndex++;
-                return;
-            }
-
-            Vector3 targetPosition = new Vector3(targetWaypoint.position.x, 0f, targetWaypoint.position.z);
+            Vector3 targetPosition = GetWaypointPosition(_currentWaypointIndex);
             Vector3 toTarget = targetPosition - flatPosition;
             float distanceToTarget = toTarget.magnitude;
             Vector3 directionToTarget = distanceToTarget > 1e-4f ? toTarget / distanceToTarget : currentForward.normalized;
@@ -136,34 +128,34 @@ namespace SimulationRobotContest
             float headingError = SignedAngleOnXZPlane(currentForward, directionToTarget);
             LastHeadingErrorDegrees = headingError * Mathf.Rad2Deg;
 
+            // --- 1. 速度制御（物理制動＋ラストスパート） ---
+            float speedTarget;
 
-            float curvature = EstimateUpcomingCurvature(directionToTarget);
-
-            float speedTarget = cruiseSpeed / (1.0f + curvatureSlowdownGain * curvature);
-            speedTarget = Mathf.Max(speedTarget, minimumSpeed);
-
-            // 最終ウェイポイント手前ではオーバーシュート防止のため減速する
-            if (_currentWaypointIndex == waypoints.Count - 1)
+            // ★ラストスパート（ゴール手前の最終区間は全開加速）
+            if (_currentWaypointIndex >= totalWpCount - 1)
             {
-                speedTarget = Mathf.Min(speedTarget, Mathf.Max(minimumSpeed, distanceToTarget * 2.0f));
+                speedTarget = 2.50f; // フルスロットル
+            }
+            else
+            {
+                speedTarget = CalculatePhysicsBasedTargetSpeed(directionToTarget, distanceToTarget);
             }
 
-            // 方位のずれが大きい場合（およそ15度=約0.26rad以上）は前進速度をゼロにし、
-            // その場旋回（超信地旋回に近い動き）で向きを合わせることを優先する。
-            // 「進みながら曲がる」方式だと、旋回中もわずかな並進速度が残るため、
-            // 車体（半径0.15m）が通路の内側の壁角を振り回すように接触するリスクが高い。
-            // 向きが合ってから前進を再開することで、旋回中の並進をほぼゼロに抑え、
-            // コーナーでの接触を構造的に防ぐ。
-            const float stopAndTurnThresholdRadians = 0.26f; // 約15度
-            if (Mathf.Abs(headingError) > stopAndTurnThresholdRadians)
+            // --- 2. 角度誤差に応じた並進・旋回速度の設定 ---
+            float absHeadingError = Mathf.Abs(headingError);
+
+            if (absHeadingError > stopAndTurnThresholdRadians)
             {
+                // 方位ズレが非常に大きい場合のみ、完全停止して旋回を優先
                 desiredLinearSpeed = 0f;
             }
             else
             {
-                float headingAlignmentFactor = Mathf.Clamp01(1.0f - Mathf.Abs(headingError) / (Mathf.PI * 0.5f));
-                desiredLinearSpeed = speedTarget * Mathf.Max(headingAlignmentFactor, 0.05f);
+                // 滑らかな旋回と減速（連続走行の維持）
+                float headingAlignmentFactor = Mathf.Clamp01(1.0f - absHeadingError / stopAndTurnThresholdRadians);
+                desiredLinearSpeed = speedTarget * Mathf.Max(headingAlignmentFactor, 0.25f);
             }
+
             desiredAngularSpeed = Mathf.Clamp(headingGain * headingError, -maxAngularSpeed, maxAngularSpeed);
         }
 
@@ -173,16 +165,10 @@ namespace SimulationRobotContest
 
         private void AdvanceWaypointIfReached(Vector3 flatPosition)
         {
-            while (_currentWaypointIndex < waypoints.Count)
+            int totalWpCount = WaypointCount;
+            while (_currentWaypointIndex < totalWpCount)
             {
-                Transform wp = waypoints[_currentWaypointIndex];
-                if (wp == null)
-                {
-                    _currentWaypointIndex++;
-                    continue;
-                }
-
-                Vector3 wpFlat = new Vector3(wp.position.x, 0f, wp.position.z);
+                Vector3 wpFlat = GetWaypointPosition(_currentWaypointIndex);
                 if (Vector3.Distance(flatPosition, wpFlat) < waypointReachedRadius)
                 {
                     _currentWaypointIndex++;
@@ -194,20 +180,61 @@ namespace SimulationRobotContest
             }
         }
 
-        private float EstimateUpcomingCurvature(Vector3 currentDirection)
+        /// <summary>
+        /// 物理制動距離 d = (v² - v_target²) / (2 * a) に基づく減速制御
+        /// </summary>
+        private float CalculatePhysicsBasedTargetSpeed(Vector3 currentDirection, float distanceToNextWp)
         {
-            int nextIndex = _currentWaypointIndex + 1;
-            if (nextIndex >= waypoints.Count || waypoints[nextIndex] == null || waypoints[_currentWaypointIndex] == null)
+            float upcomingTurnAngle = EstimateUpcomingTurnAngle(currentDirection);
+
+            // 緩やかなカーブ（35度未満）は巡航速度のまま通過
+            if (upcomingTurnAngle < 0.61f) // 約35度
             {
-                return 0.0f;
+                return cruiseSpeed;
             }
 
-            Vector3 currentWp = waypoints[_currentWaypointIndex].position;
-            Vector3 nextWp = waypoints[nextIndex].position;
+            // 必要制動距離の算出
+            float requiredBrakeDistance = (cruiseSpeed * cruiseSpeed - cornerSpeed * cornerSpeed) / (2.0f * maxDeceleration);
+
+            // ブレーキポイント手前は巡航速度を全開維持
+            if (distanceToNextWp > requiredBrakeDistance)
+            {
+                return cruiseSpeed;
+            }
+
+            // ブレーキ区間内の物理的限界到達速度
+            float allowedSpeed = Mathf.Sqrt(cornerSpeed * cornerSpeed + 2.0f * maxDeceleration * distanceToNextWp);
+
+            return Mathf.Clamp(allowedSpeed, minimumSpeed, cruiseSpeed);
+        }
+
+        private float EstimateUpcomingTurnAngle(Vector3 currentDirection)
+        {
+            int nextIndex = _currentWaypointIndex + 1;
+            int totalWpCount = WaypointCount;
+
+            if (nextIndex >= totalWpCount) return 0.0f;
+
+            Vector3 currentWp = GetWaypointPosition(_currentWaypointIndex);
+            Vector3 nextWp = GetWaypointPosition(nextIndex);
             Vector3 nextDirection = new Vector3(nextWp.x - currentWp.x, 0f, nextWp.z - currentWp.z).normalized;
 
-            float turnAngle = Mathf.Abs(SignedAngleOnXZPlane(currentDirection, nextDirection));
-            return turnAngle;
+            return Mathf.Abs(SignedAngleOnXZPlane(currentDirection, nextDirection));
+        }
+
+        private Vector3 GetWaypointPosition(int index)
+        {
+            if (waypoints != null && index < waypoints.Count && waypoints[index] != null)
+            {
+                return new Vector3(waypoints[index].position.x, 0f, waypoints[index].position.z);
+            }
+
+            if (index < _defaultOptimizedWaypoints.Count)
+            {
+                return _defaultOptimizedWaypoints[index];
+            }
+
+            return Vector3.zero;
         }
 
         private static float SignedAngleOnXZPlane(Vector3 from, Vector3 to)
@@ -224,16 +251,16 @@ namespace SimulationRobotContest
 
         private void OnDrawGizmosSelected()
         {
-            if (waypoints == null) return;
-
             Gizmos.color = Color.cyan;
-            for (int i = 0; i < waypoints.Count; i++)
+            int total = WaypointCount;
+
+            for (int i = 0; i < total; i++)
             {
-                if (waypoints[i] == null) continue;
-                Gizmos.DrawSphere(waypoints[i].position, 0.04f);
-                if (i > 0 && waypoints[i - 1] != null)
+                Vector3 pos = GetWaypointPosition(i);
+                Gizmos.DrawSphere(pos, 0.05f);
+                if (i > 0)
                 {
-                    Gizmos.DrawLine(waypoints[i - 1].position, waypoints[i].position);
+                    Gizmos.DrawLine(GetWaypointPosition(i - 1), pos);
                 }
             }
         }
