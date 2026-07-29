@@ -22,7 +22,7 @@ namespace SimulationRobotContest.EditorTools
     ///
     /// 課題文の「添付画像と同じような形状であればよい。完全一致は不要」という条件に基づき、
     /// 通路幅0.6m・全体寸法2.4m×3.0mという必須寸法は厳守しつつ、
-    /// スタート(左下)→ゴール(右上)への明確なS字（Z字）クランクとして再設計している。
+    /// スタート(右下)→ゴール(左上)への明確な逆S字（逆Z字）クランクとして再設計している。
     /// </summary>
     public static class CourseGenerator
     {
@@ -70,12 +70,23 @@ namespace SimulationRobotContest.EditorTools
         ///   行1        : 列3のみ open … 行0から行2へ抜ける「右側の縦通路」
         ///   行0 (下段) : 全列 open  … 左→右へ進み、左端(列0)がスタート
         /// </summary>
+        /// <summary>
+        /// 通行可能マスの定義（[行, 列]。行0が最下段、行4が最上段=ゴール側）。
+        /// 列0が左端、列3が右端。
+        ///
+        /// レイアウト（逆S字/逆Z字クランク。コース全体を左右反転した形）:
+        ///   行4 (上段) : 全列 open  … 右→左へ進み、左端(列0)がゴール
+        ///   行3        : 列3のみ open … 行2から行4へ抜ける「右側の縦通路」
+        ///   行2 (中段) : 全列 open  … 左→右へ進む
+        ///   行1        : 列0のみ open … 行0から行2へ抜ける「左側の縦通路」
+        ///   行0 (下段) : 全列 open  … 右→左へ進み、右端(列3)がスタート
+        /// </summary>
         private static readonly bool[,] OpenCells =
         {
             { true, true, true, true },     // 行0（下段、スタート側）
-            { false, false, false, true },  // 行1（右側のみ縦通路）
+            { true, false, false, false },  // 行1（左側のみ縦通路）
             { true, true, true, true },     // 行2（中段）
-            { true, false, false, false },  // 行3（左側のみ縦通路）
+            { false, false, false, true },  // 行3（右側のみ縦通路）
             { true, true, true, true },     // 行4（上段、ゴール側）
         };
 
@@ -138,12 +149,12 @@ namespace SimulationRobotContest.EditorTools
 
             return new List<Vector3>
             {
-                CellCenter(0, 0, half), // WP0: スタート（行0・列0）
-                CellCenter(0, 3, half), // WP1: 行0を右端まで
-                CellCenter(2, 3, half), // WP2: 行1の縦通路を抜けて行2の右端
-                CellCenter(2, 0, half), // WP3: 行2を左端まで
-                CellCenter(4, 0, half), // WP4: 行3の縦通路を抜けて行4の左端
-                CellCenter(4, 3, half), // WP5: ゴール（行4・列3）
+                CellCenter(0, 3, half), // WP0: スタート（行0・列3、右下）
+                CellCenter(0, 0, half), // WP1: 行0を左端まで
+                CellCenter(2, 0, half), // WP2: 行1の縦通路を抜けて行2の左端
+                CellCenter(2, 3, half), // WP3: 行2を右端まで
+                CellCenter(4, 3, half), // WP4: 行3の縦通路を抜けて行4の右端
+                CellCenter(4, 0, half), // WP5: ゴール（行4・列0、左上）
             };
         }
 
@@ -294,7 +305,19 @@ namespace SimulationRobotContest.EditorTools
 
             int last = centerline.Count - 1;
             Vector3 direction = (centerline[last] - centerline[last - 1]).normalized;
-            CreateLineTrigger(parent, GoalLineName, TagGoalLine, centerline[last], direction);
+
+            // ゴールラインを最終ウェイポイント（ロボットが最終的に停止する位置）そのものに
+            // 置いてしまうと、「ラインを完全に通過して離れた」判定（RobotController側で
+            // ロボット半径ぶんの余裕を要求している）を満たす前にロボットが停止してしまい、
+            // 永遠にゴール判定が成立しない。そのため、最終ウェイポイントより一定距離手前に
+            // ゴールラインを配置し、ロボットが最終停止位置に到達した時点で自然に
+            // 「ラインを完全に通過済み」となるようにする。
+            const float goalLineSetbackDistance = 0.25f;
+            float segmentLength = Vector3.Distance(centerline[last], centerline[last - 1]);
+            float setback = Mathf.Min(goalLineSetbackDistance, segmentLength * 0.5f);
+            Vector3 goalLinePosition = centerline[last] - (direction * setback);
+
+            CreateLineTrigger(parent, GoalLineName, TagGoalLine, goalLinePosition, direction);
         }
 
         private static void CreateLineTrigger(Transform parent, string name, string tag, Vector3 position, Vector3 travelDirection)
@@ -311,6 +334,7 @@ namespace SimulationRobotContest.EditorTools
 
             var marker = line.AddComponent<CourseLineMarker>();
             marker.TravelDirection = travelDirection;
+            marker.LateralHalfWidth = CorridorWidth / 2f;
 
             Undo.RegisterCreatedObjectUndo(line, $"Create {name}");
         }

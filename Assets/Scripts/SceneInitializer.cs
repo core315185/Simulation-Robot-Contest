@@ -87,7 +87,7 @@ namespace SimulationRobotContest
                 waypointList.Add(waypointsGroup.GetChild(i));
             }
 
-            WaypointFollower waypointFollower = FindFirstObjectByType<WaypointFollower>();
+            WaypointFollower waypointFollower = FindObjectOfType<WaypointFollower>();
             if (waypointFollower == null)
             {
                 Debug.LogWarning("[SceneInitializer] シーン内にWaypointFollowerが見つかりません。"
@@ -117,7 +117,7 @@ namespace SimulationRobotContest
                 return;
             }
 
-            RobotController robotController = FindFirstObjectByType<RobotController>();
+            RobotController robotController = FindObjectOfType<RobotController>();
             if (robotController == null)
             {
                 return;
@@ -154,15 +154,15 @@ namespace SimulationRobotContest
 
         private void WireRobotDependencies()
         {
-            RobotController robotController = FindFirstObjectByType<RobotController>();
+            RobotController robotController = FindObjectOfType<RobotController>();
             if (robotController == null)
             {
                 Debug.LogWarning("[SceneInitializer] シーン内にRobotControllerが見つかりません。");
                 return;
             }
 
-            WaypointFollower waypointFollower = FindFirstObjectByType<WaypointFollower>();
-            CameraController cameraController = FindFirstObjectByType<CameraController>();
+            WaypointFollower waypointFollower = FindObjectOfType<WaypointFollower>();
+            CameraController cameraController = FindObjectOfType<CameraController>();
             DataLogger dataLogger = robotController.GetComponent<DataLogger>();
             GraphExporter graphExporter = robotController.GetComponent<GraphExporter>();
 

@@ -161,6 +161,8 @@ namespace SimulationRobotContest
             }
         }
         private Collider _courseBoundsCollider;
+        private CourseLineMarker _goalLineMarker;
+        private Transform _goalLineTransform;
         private float _debugLogTimer;
         private float _lastDesiredLinearSpeed;
         private float _lastDesiredAngularSpeed;
@@ -209,6 +211,17 @@ namespace SimulationRobotContest
             {
                 Debug.LogWarning("[RobotController] \"CourseBounds\" タグのオブジェクトが見つかりません。コース外判定は無効化されます。");
             }
+
+            GameObject goalObject = GameObject.FindGameObjectWithTag("GoalLine");
+            if (goalObject != null)
+            {
+                _goalLineMarker = goalObject.GetComponent<CourseLineMarker>();
+                _goalLineTransform = goalObject.transform;
+            }
+            else
+            {
+                Debug.LogWarning("[RobotController] \"GoalLine\" タグのオブジェクトが見つかりません。ゴール判定は無効化されます。");
+            }
         }
 
         private void FixedUpdate()
@@ -226,6 +239,7 @@ namespace SimulationRobotContest
 
                 CheckTipOver();
                 CheckOutOfBounds();
+                CheckGoalReached();
 
                 if (CurrentState == RaceState.Running && dataLogger != null && cameraController != null)
                 {
@@ -273,7 +287,7 @@ namespace SimulationRobotContest
 
         private void UpdateMotionMeasurements()
         {
-            Vector3 velocity = _rigidbody.velocity;
+            Vector3 velocity = _rigidbody.linearVelocity;
             Vector3 horizontalVelocity = new Vector3(velocity.x, 0f, velocity.z);
 
             CurrentForwardSpeed = Vector3.Dot(horizontalVelocity, transform.forward);
@@ -303,7 +317,7 @@ namespace SimulationRobotContest
             float netYawTorque = (rightForce - leftForce) * (wheelTrack * 0.5f);
 
             // ---- 横滑り抑制力（摩擦相当） ----
-            Vector3 velocity = _rigidbody.velocity;
+            Vector3 velocity = _rigidbody.linearVelocity;
             Vector3 horizontalVelocity = new Vector3(velocity.x, 0f, velocity.z);
             float lateralSpeed = Vector3.Dot(horizontalVelocity, transform.right);
             float lateralForce = -lateralSpeed * lateralGripGain;
@@ -579,48 +593,40 @@ namespace SimulationRobotContest
             }
         }
 
-        private void OnTriggerStay(Collider other)
+        /// <summary>
+        /// ゴール判定。以前はOnTriggerStay/OnTriggerExit（トリガーの当たり判定が
+        /// 実際に重なっている間だけ発火するイベント）に頼っていたが、ゴールラインの
+        /// 当たり判定が薄い板状であるため、ロボットが通過する一瞬のタイミング次第で
+        /// イベントの発火漏れが起こりうる不安定な設計だった。
+        /// 代わりに、毎FixedUpdateで直接「ロボットがラインの進行方向側へ
+        /// ロボット半径ぶん完全に抜けているか」を計算するため、イベントの発火漏れに
+        /// 起因する判定漏れが原理的に発生しない。
+        /// </summary>
+        private void CheckGoalReached()
         {
-            if (other == null)
+            if (_goalLineMarker == null || _goalLineTransform == null)
             {
                 return;
             }
 
-            if (CurrentState == RaceState.Running && other.CompareTag("GoalLine"))
-            {
-                EvaluateGoalCrossing(other);
-            }
-        }
-
-        private void OnTriggerExit(Collider other)
-        {
-            if (other == null)
-            {
-                return;
-            }
-
-            if (CurrentState == RaceState.Running && other.CompareTag("GoalLine"))
-            {
-                EvaluateGoalCrossing(other);
-            }
-        }
-
-        private void EvaluateGoalCrossing(Collider goalCollider)
-        {
-            CourseLineMarker marker = goalCollider.GetComponent<CourseLineMarker>();
-            if (marker == null)
-            {
-                return;
-            }
-
-            Vector3 direction = marker.TravelDirection.normalized;
-            Vector3 linePosition = goalCollider.transform.position;
+            Vector3 direction = _goalLineMarker.TravelDirection.normalized;
+            Vector3 linePosition = _goalLineTransform.position;
 
             Vector3 toRobot = _rigidbody.position - linePosition;
-            float signedDistance = Vector3.Dot(new Vector3(toRobot.x, 0f, toRobot.z), direction);
+            Vector3 toRobotFlat = new Vector3(toRobot.x, 0f, toRobot.z);
+
+            float signedDistance = Vector3.Dot(toRobotFlat, direction);
+
+            // 進行方向に対して直交する横方向のずれも確認する。
+            // これを見ずに前後方向の座標だけで判定すると、コース上の全く別の場所
+            // （例えば別の角）でも進行方向の座標が偶然一致してしまい、
+            // 誤ってゴール扱いになってしまう（実際に発生した不具合）。
+            Vector3 lateralAxis = Vector3.Cross(Vector3.up, direction);
+            float lateralOffset = Vector3.Dot(toRobotFlat, lateralAxis);
+            bool withinLane = Mathf.Abs(lateralOffset) <= _goalLineMarker.LateralHalfWidth;
 
             // ロボット全体（半径ぶん含む）がラインの進行方向側へ完全に抜けたら成功
-            if (signedDistance > robotRadius)
+            if (withinLane && signedDistance > robotRadius)
             {
                 FinishRaceSuccess();
             }
