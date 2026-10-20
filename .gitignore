@@ -1,22 +1,33 @@
+# Unity generated
 [Ll]ibrary/
 [Tt]emp/
 [Ll]ogs/
-Obj/
-Build/
-Builds/
-UserSettings/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Uu]ser[Ss]ettings/
+[Mm]emoryCaptures/
 
+# IDE
 .vscode/
+.vs/
 
 *.csproj
 *.sln
 *.slnx
 *.user
+*.userprefs
 *.pidb
 *.booproj
 *.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
 
-MemoryCaptures/
-
+# OS
 .DS_Store
-Thumbs.dbgit reset
+Thumbs.db
+
+# 提出用の動画は別途提出するためリポジトリには含めない
+*.mp4
